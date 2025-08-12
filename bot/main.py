@@ -312,6 +312,7 @@ async def get_top_news_today(message: Message):
     )
 
 # Обработчики новых callback-кнопок
+# --- НАЧАЛО ФУНКЦИИ view_top_today_callback ---
 @dp.callback_query(lambda call: call.data == "view_top_today")
 async def view_top_today_callback(call: CallbackQuery):
     await call.answer("📊 Загружаю топ новостей за сегодня...")
@@ -341,28 +342,22 @@ async def view_top_today_callback(call: CallbackQuery):
             if "message is not modified" not in str(e).lower():
                 raise e
         
-        # Получаем пользовательские настройки
-        include_keys, exclude_keys = get_user_filters(call.from_user.id)
-        per_batch = get_user_news_count(call.from_user.id)
-
         # Получаем посты из всех каналов
         all_posts = []
-        for channel_url in channels[:5]:  # Больше каналов для большего количества постов
+        for channel_url in channels[:3]:  # Ограничиваем до 3 каналов для теста
             try:
-                logging.info(f"Парсим канал: {channel_url}")
-                posts = tg_parser.parse_channel(channel_url, 20)
-                logging.info(f"Получено {len(posts)} постов с канала {channel_url}")
+                posts = tg_parser.parse_channel(channel_url, 2)
                 all_posts.extend(posts)
             except Exception as e:
                 logging.error(f"Ошибка при обработке канала {channel_url}: {e}")
                 continue
-
+        
         # Удаляем сообщение о прогрессе и показываем результат
         if not all_posts:
             logging.warning("Не удалось получить посты ни с одного канала")
             try:
                 await call.message.edit_text(
-                    "❌ Не удалось загрузить топ новостей. Попробуйте позже.\n\n"
+                    "❌ Не удалось загрузить топ новостей. Попробуйте позже.\n"
                     "Возможные причины:\n"
                     "• Каналы недоступны или приватные\n"
                     "• Проблемы с сетью\n"
@@ -374,38 +369,18 @@ async def view_top_today_callback(call: CallbackQuery):
                     raise e
             return
         
-        # Смешиваем посты из разных каналов (round-robin), чтобы был микс источников
-        # Группируем по каналу и сортируем внутри по дате
-        from collections import defaultdict, deque
-        channel_to_posts = defaultdict(list)
-        for p in all_posts:
-            channel_to_posts[p.get('channel', 'unknown')].append(p)
-        for ch in channel_to_posts:
-            channel_to_posts[ch].sort(key=lambda x: x.get('date', ''), reverse=True)
-        # Превращаем в очереди
-        queues = {ch: deque(posts) for ch, posts in channel_to_posts.items()}
-        interleaved = []
-        # Ограничим общий объём интерливинга разумным числом, но оставим достаточно для кнопки "Ещё"
-        max_total = min(len(all_posts), 60)
-        while len(interleaved) < max_total and any(queues[ch] for ch in queues):
-            for ch in list(queues.keys()):
-                if queues[ch]:
-                    interleaved.append(queues[ch].popleft())
-                if len(interleaved) >= max_total:
-                    break
+        # Сортируем посты по дате (новые первыми)
+        all_posts.sort(key=lambda x: x.get('date', ''), reverse=True)
         
-        # Применяем фильтры пользователя
-        interleaved = apply_filters(interleaved, include_keys, exclude_keys)
-
-        # Первые N постов для показа
-        posts_to_show = interleaved[:per_batch]
+        # Берем первые 4 поста
+        posts_to_show = all_posts[:4]
         
         # Сохраняем в кэш для кнопки "Еще новости"
         top_news_cache[call.from_user.id] = {
-            'all_posts': interleaved,
+            'all_posts': all_posts,
             'shown_posts': posts_to_show,
             'channels': channels,
-            'per_batch': per_batch,
+            'per_batch': 4,  # Количество постов за раз
         }
         
         # Обновляем сообщение
@@ -453,24 +428,25 @@ async def view_top_today_callback(call: CallbackQuery):
                 
                 # Добавляем задержку между сообщениями (кроме последнего)
                 if i < len(posts_to_show) - 1:
-                    await asyncio.sleep(1.5)  # 1.5 секунды задержки
-                    
+                    await asyncio.sleep(1.5) # 1.5 секунды задержки
             except Exception as e:
                 logging.error(f"Ошибка при отправке поста: {e}")
                 continue
         
-        # Добавляем кнопку "Еще новости" с информацией о количестве
-        remaining_posts = len(interleaved) - len(posts_to_show)
+        # --- НОВАЯ ЛОГИКА ДЛЯ КНОПКИ "ЕЩЕ НОВОСТИ" ---
+        # Проверяем, остались ли ещё посты
+        remaining_posts = len(all_posts) - len(posts_to_show)
+        
         if remaining_posts > 0:
+            # Если есть еще посты, отправляем сообщение с кнопкой "Еще новости"
             await call.message.answer(
-                f"🔄 Показано {len(posts_to_show)} из {len(all_posts)} постов. Осталось ещё {remaining_posts}.",
+                f"🔄 Показано {len(posts_to_show)} из {len(all_posts)}. Осталось ещё {remaining_posts}.",
                 reply_markup=get_top_news_buttons()
             )
         else:
-            await call.message.answer(
-                "✅ Все доступные посты показаны!",
-                reply_markup=get_top_news_initial_buttons()
-            )
+            # Если посты закончились, отправляем финальное сообщение
+            await call.message.answer("✅ Все доступные посты показаны!", reply_markup=get_top_news_initial_buttons())
+        # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
         
     except Exception as e:
         logging.error(f"Ошибка при получении топ новостей: {e}")
@@ -483,6 +459,7 @@ async def view_top_today_callback(call: CallbackQuery):
             if "message is not modified" not in str(edit_error).lower():
                 logging.error(f"Ошибка при редактировании сообщения: {edit_error}")
         await call.answer("Ошибка при загрузке топ новостей")
+# --- КОНЕЦ ФУНКЦИИ view_top_today_callback ---
 
 @dp.callback_query(lambda call: call.data == "more_top_news")
 async def more_top_news_callback(call: CallbackQuery):
