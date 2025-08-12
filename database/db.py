@@ -32,14 +32,15 @@ def init_db():
         """
     )
 
-    # --- ИСПРАВЛЕНИЕ: Добавляем поле digest_schedule в user_settings ---
+    # --- ИСПРАВЛЕНИЕ: Добавляем поле digest_schedule и filters в user_settings ---
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
-            telegram_channels TEXT,  -- JSON список каналов
+            telegram_channels TEXT,     -- JSON список каналов
             news_count INTEGER DEFAULT 2,
-            digest_schedule TEXT,    -- НОВОЕ ПОЛЕ для настроек дайджеста
+            digest_schedule TEXT,       -- JSON настройки дайджеста
+            filters TEXT,               -- НОВОЕ ПОЛЕ: JSON фильтры пользователя
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
         """
@@ -81,9 +82,14 @@ def add_user(telegram_id: int):
     try:
         cursor.execute("INSERT INTO users (telegram_id) VALUES (?)", (telegram_id,))
         # Добавляем настройки по умолчанию
+        # Обновляем INSERT OR IGNORE, чтобы не перезаписывать существующие настройки
         cursor.execute(
-            "INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", 
-            (telegram_id,)
+            """
+            INSERT OR IGNORE INTO user_settings 
+            (user_id, telegram_channels, news_count, digest_schedule, filters) 
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (telegram_id, json.dumps(DEFAULT_TELEGRAM_CHANNELS), 2, '{}', '{}')
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -167,17 +173,21 @@ def set_user_channels(user_id: int, channels: List[str]):
     cursor = conn.cursor()
     try:
         channels_json = json.dumps(channels)
+        # Используем INSERT OR REPLACE для обновления или вставки
+        # Обновляем все поля, используя COALESCE для сохранения старых значений
         cursor.execute(
             """
-            INSERT OR REPLACE INTO user_settings (user_id, telegram_channels, news_count, digest_schedule) 
+            INSERT OR REPLACE INTO user_settings 
+            (user_id, telegram_channels, news_count, digest_schedule, filters) 
             VALUES (
                 ?, 
                 ?,
                 COALESCE((SELECT news_count FROM user_settings WHERE user_id = ?), 2),
-                COALESCE((SELECT digest_schedule FROM user_settings WHERE user_id = ?), '{}')
+                COALESCE((SELECT digest_schedule FROM user_settings WHERE user_id = ?), '{}'),
+                COALESCE((SELECT filters FROM user_settings WHERE user_id = ?), '{}')
             )
             """,
-            (user_id, channels_json, user_id, user_id)
+            (user_id, channels_json, user_id, user_id, user_id)
         )
         conn.commit()
     except Exception as e:
@@ -218,7 +228,7 @@ def mark_post_as_sent(post_link: str, channel_name: str):
     finally:
         conn.close()
 
-# --- НОВЫЕ ФУНКЦИИ ДЛЯ ДАЙДЖЕСТА ---
+# --- ФУНКЦИИ ДЛЯ ДАЙДЖЕСТА И ФИЛЬТРОВ ---
 
 def get_digest_schedule(user_id: int) -> dict:
     """
@@ -277,27 +287,96 @@ def set_digest_schedule(user_id: int, schedule: dict):
     try:
         schedule_json = json.dumps(schedule)
         # Используем INSERT OR REPLACE для обновления или вставки
-        # Обновляем все поля, используя COALESCE для сохранения старых значений, если новые NULL
         cursor.execute(
             """
             INSERT OR REPLACE INTO user_settings 
-            (user_id, 
-             telegram_channels, 
-             news_count, 
-             digest_schedule) 
+            (user_id, telegram_channels, news_count, digest_schedule, filters) 
             VALUES (
                 ?, 
                 COALESCE((SELECT telegram_channels FROM user_settings WHERE user_id = ?), ?),
                 COALESCE((SELECT news_count FROM user_settings WHERE user_id = ?), 2),
-                ?
+                ?,
+                COALESCE((SELECT filters FROM user_settings WHERE user_id = ?), '{}')
             )
             """,
-            (user_id, user_id, json.dumps(DEFAULT_TELEGRAM_CHANNELS), user_id, schedule_json)
+            (user_id, user_id, json.dumps(DEFAULT_TELEGRAM_CHANNELS), user_id, schedule_json, user_id)
         )
         conn.commit()
         print(f"[DEBUG] Настройки дайджеста для пользователя {user_id} успешно сохранены: {schedule}")
     except Exception as e:
         print(f"Ошибка при сохранении настроек дайджеста для пользователя {user_id}: {e}")
+    finally:
+        conn.close()
+
+
+def get_user_filters(user_id: int) -> dict:
+    """
+    Получение фильтров пользователя для дайджеста.
+    Возвращает словарь с настройками фильтров.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT filters FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+        
+        if result and result[0]:
+            try:
+                filters_data = json.loads(result[0])
+                # Базовая валидация типа
+                if isinstance(filters_data, dict):
+                    return filters_data
+                else:
+                    print(f"Предупреждение: Некорректный формат фильтров для пользователя {user_id}")
+            except json.JSONDecodeError:
+                print(f"Предупреждение: Некорректный JSON фильтров для пользователя {user_id}")
+                # Если JSON поврежден, возвращаем пустой словарь
+        
+        # Возвращаем пустой словарь, если фильтры не найдены, повреждены или неверного типа
+        return {}
+    except Exception as e:
+        print(f"Ошибка при получении фильтров для пользователя {user_id}: {e}")
+        # Возвращаем пустой словарь в случае ошибки
+        return {}
+    finally:
+        conn.close()
+
+
+def set_user_filters(user_id: int, filters: dict):
+    """
+    Сохранение фильтров пользователя.
+    """
+    # Базовая валидация входных данных
+    if not isinstance(filters, dict):
+        print(f"Ошибка: filters должен быть словарем, получен {type(filters)}")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        filters_json = json.dumps(filters)
+        # Используем INSERT OR REPLACE для обновления или вставки
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO user_settings 
+            (user_id, telegram_channels, news_count, digest_schedule, filters) 
+            VALUES (
+                ?, 
+                COALESCE((SELECT telegram_channels FROM user_settings WHERE user_id = ?), ?),
+                COALESCE((SELECT news_count FROM user_settings WHERE user_id = ?), 2),
+                COALESCE((SELECT digest_schedule FROM user_settings WHERE user_id = ?), '{}'),
+                ?
+            )
+            """,
+            (user_id, user_id, json.dumps(DEFAULT_TELEGRAM_CHANNELS), user_id, user_id, filters_json)
+        )
+        conn.commit()
+        print(f"[DEBUG] Фильтры для пользователя {user_id} успешно сохранены: {filters}")
+    except Exception as e:
+        print(f"Ошибка при сохранении фильтров для пользователя {user_id}: {e}")
     finally:
         conn.close()
 
