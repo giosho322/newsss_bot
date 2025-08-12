@@ -461,12 +461,14 @@ async def view_top_today_callback(call: CallbackQuery):
         await call.answer("Ошибка при загрузке топ новостей")
 # --- КОНЕЦ ФУНКЦИИ view_top_today_callback ---
 
-@dp.callback_query(lambda call: call.data == "more_top_news")
+# --- НАЧАЛО ФУНКЦИИ more_top_news_callback ---
+@dp.callback_query(lambda call: call.data == "more_news")
 async def more_top_news_callback(call: CallbackQuery):
     user_id = call.from_user.id
     await call.answer("Загружаю ещё новости...")
-
+    
     try:
+        # Получаем кэш пользователя
         cache = top_news_cache.get(user_id)
         if not cache:
             try:
@@ -478,14 +480,14 @@ async def more_top_news_callback(call: CallbackQuery):
                 if "message is not modified" not in str(e).lower():
                     raise e
             return
-
+        
         all_posts = cache.get('all_posts', [])
         shown_posts = cache.get('shown_posts', [])
-
         start_index = len(shown_posts)
         batch_size = cache.get('per_batch', 4)
+        
         next_posts = all_posts[start_index:start_index + batch_size]
-
+        
         if not next_posts:
             try:
                 await call.message.edit_text(
@@ -496,24 +498,24 @@ async def more_top_news_callback(call: CallbackQuery):
                 if "message is not modified" not in str(e).lower():
                     raise e
             return
-
+        
+        # Отправляем новые посты
         for i, post in enumerate(next_posts, start=start_index):
             try:
                 post_id = f"top_{user_id}_{i}"
                 news_cache[post_id] = post
-
+                
+                # Формируем сообщение (аналогично view_top_today_callback)
                 title = clean_html(post.get('title', 'Без заголовка'))
                 text = clean_html(post.get('text', ''))
-
                 if len(text) > 300:
                     text = text[:300] + "..."
-
                 caption = f"📢 <b>{title}</b>\n\n"
                 if text:
                     caption += f"💬 {text}\n\n"
                 caption += f"📍 Канал: @{post.get('channel', 'Неизвестный канал')}\n"
                 caption += f"🔗 <a href='{post.get('link', '')}'>Читать далее</a>"
-
+                
                 if post.get('image_url'):
                     try:
                         await call.message.answer_photo(
@@ -526,41 +528,37 @@ async def more_top_news_callback(call: CallbackQuery):
                         await call.message.answer(caption, parse_mode="HTML")
                 else:
                     await call.message.answer(caption, parse_mode="HTML")
-
+                
                 # Добавляем задержку между сообщениями (кроме последнего)
-                if i < len(next_posts) - 1:
-                    await asyncio.sleep(1.5)  # 1.5 секунды задержки
-
+                if i < start_index + len(next_posts) - 1:
+                    await asyncio.sleep(1.5)
             except Exception as e:
                 logging.error(f"Ошибка при отправке поста: {e}")
                 continue
-
+        
         # Обновляем показанные посты в кэше
         cache['shown_posts'] = shown_posts + next_posts
         top_news_cache[user_id] = cache
-
+        
         # Удаляем старое сообщение с кнопкой "Еще новости"
         try:
             await call.message.delete()
         except Exception as e:
             logging.error(f"Ошибка при удалении сообщения: {e}")
-
+        
         # Проверяем, остались ли ещё посты для показа
         remaining_posts = len(all_posts) - len(cache['shown_posts'])
         
         if remaining_posts > 0:
             # Если посты ещё есть, отправляем новое сообщение с кнопкой "Ещё новости"
             await call.message.answer(
-                f"🔄 Показано {len(cache['shown_posts'])} из {len(all_posts)} постов. Осталось ещё {remaining_posts}.",
+                f"🔄 Показано {len(cache['shown_posts'])} из {len(all_posts)}. Осталось ещё {remaining_posts}.",
                 reply_markup=get_top_news_buttons()
             )
         else:
             # Если посты закончились, отправляем финальное сообщение
-            await call.message.answer(
-                "✅ Все доступные посты показаны!",
-                reply_markup=get_top_news_initial_buttons()
-            )
-
+            await call.message.answer("✅ Все доступные посты показаны!", reply_markup=get_top_news_initial_buttons())
+            
     except Exception as e:
         logging.error(f"Ошибка при загрузке дополнительных новостей: {e}")
         try:
@@ -571,7 +569,7 @@ async def more_top_news_callback(call: CallbackQuery):
         except Exception as edit_error:
             if "message is not modified" not in str(edit_error).lower():
                 logging.error(f"Ошибка при редактировании сообщения: {edit_error}")
-        await call.answer("Ошибка при загрузке")
+# --- КОНЕЦ ФУНКЦИИ more_top_news_callback ---
 
 @dp.callback_query(lambda call: call.data == "manage_channels")
 async def manage_channels_callback(call: CallbackQuery):
@@ -1254,7 +1252,7 @@ async def schedule_digest_callback(call: CallbackQuery):
     """Показывает меню настройки расписания дайджестов."""
     try:
         schedule = get_digest_schedule(call.from_user.id)
-        status = "✅ Включен" if schedule['is_active'] else "❌ Отключен"
+        status = "✅ Включен" if schedule.get('enabled', False) else "❌ Отключен"
         time_str = schedule['time'] if schedule['time'] else "Не установлено"
         days_str = ", ".join(schedule['days']) if schedule['days'] else "Все дни"
         
