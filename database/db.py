@@ -4,10 +4,11 @@ import os
 import json
 from typing import List, Dict, Any, Optional
 
-# --- ИСПРАВЛЕНИЕ 1: Убираем несуществующий импорт и определяем DEFAULT_TELEGRAM_CHANNELS ---
+# --- ИСПРАВЛЕНИЕ: Убираем несуществующий импорт и определяем DEFAULT_TELEGRAM_CHANNELS локально ---
 DB_NAME = "news_bot.db"
 
 # Определяем значение по умолчанию прямо здесь
+# Обновленный список каналов из логов
 DEFAULT_TELEGRAM_CHANNELS = [
     "https://t.me/finansist_busines",
     "https://t.me/TrendWatching24", 
@@ -31,7 +32,7 @@ def init_db():
         """
     )
 
-    # --- ИСПРАВЛЕНИЕ 2: Добавляем поле digest_schedule в user_settings ---
+    # --- ИСПРАВЛЕНИЕ: Добавляем поле digest_schedule в user_settings ---
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS user_settings (
@@ -131,7 +132,7 @@ def get_favorites(user_id: int) -> list:
 
 def get_user_channels(user_id: int) -> List[str]:
     """Получение списка каналов пользователя"""
-    # --- ИСПРАВЛЕНИЕ 3: Используем DEFAULT_TELEGRAM_CHANNELS, определенный выше ---
+    # --- ИСПРАВЛЕНИЕ: Используем DEFAULT_TELEGRAM_CHANNELS, определенный выше ---
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
