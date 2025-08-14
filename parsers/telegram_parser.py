@@ -128,17 +128,48 @@ class TelegramParser:
             image_url = ''
             video_url = ''
             animation_url = ''
+            
+            # Сначала проверяем специальные классы для медиафайлов поста
             photo_wrap = post_element.select_one('.tgme_widget_message_photo_wrap')
             if photo_wrap:
                 style = photo_wrap.get('style', '')
                 # Возможные варианты: url('...'), url("..."), url(...)
-                m = re.search(r'''background-image:\s*url\((?:'|")?([^'")]+)(?:'|")?\)''', style)
+                m = re.search(r'''background-image:\s*url\(['"]?([^'")]+)['"]?\)''', style)
                 if m:
                     image_url = m.group(1)
+            
+            # Если не нашли через photo_wrap, ищем через photo класс
             if not image_url:
-                img_tag = post_element.select_one('.tgme_widget_message_photo img, img.tgme_widget_message_photo')
-                if img_tag and img_tag.get('src'):
-                    image_url = img_tag.get('src')
+                photo_elem = post_element.select_one('.tgme_widget_message_photo')
+                if photo_elem:
+                    # Ищем img внутри photo
+                    img_tag = photo_elem.select_one('img')
+                    if img_tag and img_tag.get('src'):
+                        image_url = img_tag.get('src')
+                    else:
+                        # Проверяем style у photo элемента
+                        style = photo_elem.get('style', '')
+                        if 'background-image' in style:
+                            m = re.search(r'''background-image:\s*url\(['"]?([^'")]+)['"]?\)''', style)
+                            if m:
+                                image_url = m.group(1)
+            
+            # Если все еще не нашли, ищем все img теги и фильтруем аватары
+            if not image_url:
+                all_images = post_element.select('img')
+                
+                for img in all_images:
+                    src = img.get('src', '')
+                    
+                    # Пропускаем аватары (они обычно содержат 'avatar' или имеют определенный размер)
+                    if 'avatar' in src.lower() or 'emoji' in src.lower():
+                        continue
+                    
+                    # Проверяем, что это медиафайл поста
+                    if src and ('cdn4.telesco.pe' in src or 'cdn5.telesco.pe' in src):
+                        # Это может быть медиафайл поста
+                        image_url = src
+                        break
 
             # Пытаемся извлечь видео (mp4)
             try:
@@ -169,7 +200,7 @@ class TelegramParser:
                 'title': title,
                 'text': text,
                 'link': link,
-                'channel': channel_name,
+                'source': channel_name,  # Изменено с 'channel' на 'source'
                 'date': date_str,
                 'views': views,
                 'channel_url': f"https://t.me/{channel_name}",
