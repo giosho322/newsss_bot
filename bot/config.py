@@ -7,9 +7,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Список Telegram каналов для мониторинга
 TELEGRAM_CHANNELS = [
-    "https://t.me/tproger",  # Примеры реальных IT каналов
-    "https://t.me/habr", 
-    # Добавьте сюда нужные вам каналы
+    "https://t.me/tproger",      # IT новости
+    "https://t.me/rbc_news",     # РБК
+    "https://t.me/lenta_ru",     # Лента.ру
+    "https://t.me/ria_news",     # РИА Новости
+    "https://t.me/kommersant_ru", # Коммерсантъ
+    "https://t.me/vedomosti",    # Ведомости
+    "https://t.me/izvestia_ru",  # Известия
+    "https://t.me/mk_ru",        # МК
 ]
 
 NEWS_SOURCES = {

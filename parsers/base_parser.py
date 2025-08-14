@@ -63,7 +63,7 @@ class BaseParser:
             
             if content:
                 # Удаляем скрипты и стили
-                for script in content(["script", "style"]):
+                for script in content(["script", "style", "noscript", "iframe", "svg", "aside", "nav"]):
                     script.decompose()
                 
                 # Получаем текст

@@ -4,17 +4,50 @@ import json
 import logging
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime, timedelta
+import hashlib
 
 # Настройка логирования для этого модуля
 logger = logging.getLogger(__name__)
 
 DB_NAME = "news_bot.db"
 
+class Database:
+    def __init__(self, db_path: str = 'database.db'):
+        self.conn = sqlite3.connect(db_path)
+        self.cursor = self.conn.cursor()
+        self._init_db()
+        logger.info("База данных инициализирована")
+
+    def _init_db(self):
+        """Создает таблицы, если они не существуют"""
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                chat_id INTEGER UNIQUE,
+                is_active BOOLEAN DEFAULT 1
+            )
+        """)
+        
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schedules (
+                chat_id INTEGER PRIMARY KEY,
+                time TEXT,
+                is_active BOOLEAN DEFAULT 0,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id)
+            )
+        """)
+        self.conn.commit()
+
+    
 DEFAULT_TELEGRAM_CHANNELS = [
-    "https://t.me/finansist_busines",
-    "https://t.me/TrendWatching24",
-    "https://t.me/bazaar_live",
-    "https://t.me/habr",
+    "https://t.me/tproger",
+    "https://t.me/rbc_news",
+    "https://t.me/lenta_ru",
+    "https://t.me/ria_news",
+    "https://t.me/kommersant_ru",
+    "https://t.me/vedomosti",
+    "https://t.me/izvestia_ru",
+    "https://t.me/mk_ru",
 ]
 
 def init_db():
@@ -213,6 +246,15 @@ def init_db():
         )
     """)
 
+    # Маппинг коротких токенов на длинные ссылки (для callback_data)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS link_mapping (
+            token TEXT PRIMARY KEY,
+            url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
     # Пробуем выполнить миграции (добавление недостающих колонок)
@@ -262,6 +304,41 @@ def migrate_db():
     finally:
         conn.close()
 
+def get_or_create_link_token(url: str) -> str:
+    """Возвращает короткий токен для URL. Создает запись, если ее нет."""
+    if not url:
+        return ""
+    token = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT url FROM link_mapping WHERE token = ?", (token,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("INSERT OR IGNORE INTO link_mapping (token, url) VALUES (?, ?)", (token, url))
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при сохранении link_token: {e}")
+    finally:
+        conn.close()
+    return token
+
+def get_url_by_token(token: str) -> Optional[str]:
+    """Возвращает URL по токену."""
+    if not token:
+        return None
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT url FROM link_mapping WHERE token = ?", (token,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при чтении link_token: {e}")
+        return None
+    finally:
+        conn.close()
+
 # --- Базовые функции пользователей и настроек ---
 
 def add_user(telegram_id: int, username: str = None, first_name: str = None, last_name: str = None):
@@ -282,9 +359,9 @@ def add_user(telegram_id: int, username: str = None, first_name: str = None, las
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             telegram_id, 
-            json.dumps(DEFAULT_TELEGRAM_CHANNELS), 
-            2, 
-            '{}', 
+                         json.dumps(DEFAULT_TELEGRAM_CHANNELS), 
+             10, 
+             '{}', 
             '{}',
             '[]', # include_keywords
             '[]', # exclude_keywords
@@ -336,16 +413,20 @@ def update_user_activity(telegram_id: int):
     finally:
         conn.close()
 
+# В database/db.py
+# В database/db.py
 def get_active_users(hours: int = 24) -> List[int]:
     """Получение списка активных пользователей за последние N часов"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         time_threshold = datetime.now() - timedelta(hours=hours)
+        # --- ИСПРАВЛЕНИЕ: Используем 'user_id' вместо 'id' ---
         cursor.execute("""
             SELECT user_id FROM users 
             WHERE last_activity > ? AND is_active = TRUE
         """, (time_threshold,))
+        # ---
         return [row[0] for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении активных пользователей: {e}")
@@ -353,6 +434,42 @@ def get_active_users(hours: int = 24) -> List[int]:
     finally:
         conn.close()
 
+def get_total_users() -> int:
+    """Возвращает общее количество зарегистрированных пользователей."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM users")
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при подсчете пользователей: {e}")
+        return 0
+    finally:
+        conn.close()
+
+def get_all_user_ids(only_active: bool = False, active_hours: int = 24) -> List[int]:
+    """Возвращает список user_id всех пользователей. Можно ограничить активными."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        if only_active:
+            time_threshold = datetime.now() - timedelta(hours=active_hours)
+            cursor.execute(
+                """
+                SELECT user_id FROM users
+                WHERE last_activity > ? AND is_active = TRUE
+                """,
+                (time_threshold,)
+            )
+        else:
+            cursor.execute("SELECT user_id FROM users WHERE is_active = TRUE")
+        return [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении списка пользователей: {e}")
+        return []
+    finally:
+        conn.close()
 # --- Настройки пользователя ---
 
 def get_user_channels(user_id: int) -> List[str]:
@@ -401,9 +518,9 @@ def set_user_channels(user_id: int, channels: List[str]):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, 
-                channels_json, 
-                2, 
-                '{}', 
+                                 channels_json, 
+                 10, 
+                 '{}', 
                 '{}',
                 '[]', # include_keywords
                 '[]', # exclude_keywords
@@ -461,96 +578,57 @@ def set_user_news_count(user_id: int, news_count: int):
     finally:
         conn.close()
 
-def get_user_filters(user_id: int) -> dict:
-    """Получение фильтров пользователя."""
+def get_user_filters(user_id: int) -> tuple[list, list]:
+    """Возвращает кортеж (include_keywords, exclude_keywords) списками строк."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT filters FROM user_settings WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        
-        if result and result[0]:
-            try:
-                filters_data = json.loads(result[0])
-                return filters_data if isinstance(filters_data, dict) else {}
-            except json.JSONDecodeError:
-                return {}
-        else:
-            return {}
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при получении фильтров для пользователя {user_id}: {e}")
-        return {}
-    finally:
-        conn.close()
-
-def set_user_filters(user_id: int, filters: dict):
-    """Сохранение фильтров пользователя."""
-    if not isinstance(filters, dict):
-        logger.error(f"Ошибка: filters должен быть словарем, получен {type(filters)}")
-        return
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        filters_json = json.dumps(filters)
-        cursor.execute("""
-            UPDATE user_settings 
-            SET filters = ?
-            WHERE user_id = ?
-        """, (filters_json, user_id))
-        conn.commit()
-        logger.info(f"[DEBUG] Фильтры для пользователя {user_id} успешно сохранены: {filters}")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при сохранении фильтров для пользователя {user_id}: {e}")
-    finally:
-        conn.close()
-
-def get_user_keywords(user_id: int) -> Tuple[List[str], List[str]]:
-    """Получение включающих и исключающих ключевых слов."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT include_keywords, exclude_keywords FROM user_settings WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            try:
-                include = json.loads(result[0]) if result[0] else []
-                exclude = json.loads(result[1]) if result[1] else []
-                return (include if isinstance(include, list) else [], 
-                        exclude if isinstance(exclude, list) else [])
-            except json.JSONDecodeError:
-                return [], []
-        else:
-            return [], []
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при получении ключевых слов для пользователя {user_id}: {e}")
+        cursor.execute(
+            "SELECT include_keywords, exclude_keywords FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        include_raw = row[0] if row else None
+        exclude_raw = row[1] if row else None
+        try:
+            include_list = json.loads(include_raw) if include_raw else []
+            exclude_list = json.loads(exclude_raw) if exclude_raw else []
+        except Exception:
+            include_list, exclude_list = [], []
+        # Гарантируем типы
+        include_list = [str(x) for x in include_list if isinstance(x, (str, int, float))]
+        exclude_list = [str(x) for x in exclude_list if isinstance(x, (str, int, float))]
+        return include_list, exclude_list
+    except Exception as e:
+        print(f"Ошибка при получении фильтров: {e}")
         return [], []
     finally:
         conn.close()
 
-def set_user_keywords(user_id: int, include_keys: List[str], exclude_keys: List[str]):
-    """Сохранение включающих и исключающих ключевых слов."""
-    if not isinstance(include_keys, list) or not isinstance(exclude_keys, list):
-        logger.error("Ошибка: include_keys и exclude_keys должны быть списками")
-        return
-
+def set_user_filters(user_id: int, include_keywords: List[str], exclude_keywords: List[str]):
+    """Сохраняет фильтры пользователя как JSON."""
+    include_clean = [str(x).strip().lower() for x in include_keywords if str(x).strip()]
+    exclude_clean = [str(x).strip().lower() for x in exclude_keywords if str(x).strip()]
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
-        include_json = json.dumps(include_keys)
-        exclude_json = json.dumps(exclude_keys)
-        cursor.execute("""
-            UPDATE user_settings 
-            SET include_keywords = ?, exclude_keywords = ?
-            WHERE user_id = ?
-        """, (include_json, exclude_json, user_id))
+        cursor.execute(
+            """
+            INSERT INTO user_settings (user_id, include_keywords, exclude_keywords)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              include_keywords=excluded.include_keywords,
+              exclude_keywords=excluded.exclude_keywords
+            """,
+            (user_id, json.dumps(include_clean), json.dumps(exclude_clean))
+        )
         conn.commit()
-        logger.info(f"Ключевые слова для пользователя {user_id} успешно сохранены.")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при сохранении ключевых слов для пользователя {user_id}: {e}")
+    except Exception as e:
+        print(f"Ошибка при сохранении фильтров: {e}")
     finally:
         conn.close()
+
+
 
 # --- Избранное ---
 
@@ -592,144 +670,98 @@ def get_favorites(user_id: int) -> List[Tuple[str, str]]:
     finally:
         conn.close()
 
-def export_favorites(user_id: int, format: str = 'txt') -> Optional[str]:
-    """Экспорт избранных новостей. Возвращает путь к файлу или содержимое."""
-    favorites = get_favorites(user_id)
-    if not favorites:
-        return None
 
-    try:
-        if format == 'txt':
-            content = "\n".join([f"{title}\n{url}\n" for title, url in favorites])
-        elif format == 'csv':
-            import csv
-            import io
-            output = io.StringIO()
-            writer = csv.writer(output)
-            writer.writerow(['Title', 'URL'])
-            writer.writerows(favorites)
-            content = output.getvalue()
-            output.close()
-        else:
-            return None
-            
-        # Логируем экспорт
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO export_history (user_id, format, content_size) VALUES (?, ?, ?)
-        """, (user_id, format, len(content)))
-        conn.commit()
-        conn.close()
-        
-        return content
-    except Exception as e:
-        logger.error(f"Ошибка при экспорте избранного для пользователя {user_id}: {e}")
-        return None
 
 # --- Дайджест и расписание ---
 
 def get_digest_schedule(user_id: int) -> dict:
-    """Получение настроек дайджеста для пользователя."""
+    """
+    Получение настроек дайджеста для пользователя.
+    Возвращает словарь с настройками.
+    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT digest_schedule FROM user_settings WHERE user_id = ?", (user_id,))
+        cursor.execute(
+            "SELECT digest_schedule FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
         result = cursor.fetchone()
         
         if result and result[0]:
             try:
                 schedule_data = json.loads(result[0])
-                return schedule_data if isinstance(schedule_data, dict) else {}
+                # Убедимся, что возвращаемый словарь содержит все нужные ключи
+                return {
+                    'is_active': schedule_data.get('is_active', False),
+                    'time': schedule_data.get('time', '09:00'),
+                    'days': schedule_data.get('days', [])
+                }
             except json.JSONDecodeError:
-                return {}
-        else:
-            return {}
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при получении расписания дайджеста для пользователя {user_id}: {e}")
-        return {}
+                # Если JSON поврежден, возвращаем значения по умолчанию
+                pass
+        
+        # Возвращаем значения по умолчанию, если настройки не найдены, повреждены или неверного типа
+        return {
+            'is_active': False,
+            'time': '09:00',
+            'days': []
+        }
+    except Exception as e:
+        print(f"Ошибка при получении настроек дайджеста для пользователя {user_id}: {e}")
+        # Возвращаем значения по умолчанию в случае ошибки
+        return {
+            'is_active': False,
+            'time': '09:00',
+            'days': []
+        }
     finally:
         conn.close()
 
-def set_digest_schedule(user_id: int, schedule: dict):
-    """Сохранение настроек дайджеста для пользователя."""
-    if not isinstance(schedule, dict):
-        logger.error(f"Ошибка: schedule должен быть словарем, получен {type(schedule)}")
-        return
+# В database/db.py
+def set_digest_schedule(user_id: int, time: str, days: list, is_active: bool):
+    """
+    Сохранение настроек дайджеста для пользователя.
+    """
+    schedule = {
+        'time': time,
+        'days': days,
+        'is_active': is_active
+    }
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         schedule_json = json.dumps(schedule)
-        cursor.execute("""
-            UPDATE user_settings 
-            SET digest_schedule = ?
-            WHERE user_id = ?
-        """, (schedule_json, user_id))
+        # Используем INSERT OR REPLACE для обновления или вставки
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO user_settings 
+            (user_id, telegram_channels, news_count, digest_schedule, filters, include_keywords, exclude_keywords, digest_days, digest_time, theme, notification_settings) 
+            VALUES (
+                ?, 
+                COALESCE((SELECT telegram_channels FROM user_settings WHERE user_id = ?), ?),
+                COALESCE((SELECT news_count FROM user_settings WHERE user_id = ?), 2),
+                ?,
+                COALESCE((SELECT filters FROM user_settings WHERE user_id = ?), '{}'),
+                COALESCE((SELECT include_keywords FROM user_settings WHERE user_id = ?), '[]'),
+                COALESCE((SELECT exclude_keywords FROM user_settings WHERE user_id = ?), '[]'),
+                COALESCE((SELECT digest_days FROM user_settings WHERE user_id = ?), '[]'),
+                COALESCE((SELECT digest_time FROM user_settings WHERE user_id = ?), '09:00'),
+                COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'light'),
+                COALESCE((SELECT notification_settings FROM user_settings WHERE user_id = ?), '{}')
+            )
+            """,
+            (user_id, user_id, json.dumps(DEFAULT_TELEGRAM_CHANNELS), user_id, schedule_json, user_id, user_id, user_id, user_id, user_id, user_id, user_id)
+        )
         conn.commit()
-        logger.info(f"[DEBUG] Настройки дайджеста для пользователя {user_id} успешно сохранены: {schedule}")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при сохранении расписания дайджеста для пользователя {user_id}: {e}")
+        print(f"[DEBUG] Настройки дайджеста для пользователя {user_id} успешно сохранены: {schedule}")
+    except Exception as e:
+        print(f"Ошибка при сохранении настроек дайджеста для пользователя {user_id}: {e}")
     finally:
         conn.close()
 
-def get_user_digest_settings(user_id: int) -> dict:
-    """Получение всех настроек дайджеста пользователя."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            SELECT digest_days, digest_time, news_count FROM user_settings WHERE user_id = ?
-        """, (user_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            try:
-                days = json.loads(result[0]) if result[0] else []
-                time = result[1] if result[1] else '09:00'
-                count = int(result[2]) if result[2] else 5
-                return {
-                    'days': days if isinstance(days, list) else [],
-                    'time': time,
-                    'count': count
-                }
-            except (json.JSONDecodeError, ValueError, TypeError):
-                return {'days': [], 'time': '09:00', 'count': 5}
-        else:
-            return {'days': [], 'time': '09:00', 'count': 5}
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при получении настроек дайджеста для пользователя {user_id}: {e}")
-        return {'days': [], 'time': '09:00', 'count': 5}
-    finally:
-        conn.close()
 
-def set_user_digest_settings(user_id: int, days: List[int], time: str, count: int):
-    """Сохранение настроек дайджеста пользователя."""
-    if not isinstance(days, list) or not all(isinstance(d, int) and 0 <= d <= 6 for d in days):
-        logger.error("Ошибка: days должен быть списком целых чисел от 0 до 6")
-        return
-    if not isinstance(time, str) or len(time.split(':')) != 2:
-        logger.error("Ошибка: time должен быть в формате HH:MM")
-        return
-    if not isinstance(count, int) or count < 1 or count > 50:
-        logger.error("Ошибка: count должен быть целым числом от 1 до 50")
-        return
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        days_json = json.dumps(days)
-        cursor.execute("""
-            UPDATE user_settings 
-            SET digest_days = ?, digest_time = ?, news_count = ?
-            WHERE user_id = ?
-        """, (days_json, time, count, user_id))
-        conn.commit()
-        logger.info(f"Настройки дайджеста для пользователя {user_id} успешно сохранены.")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при сохранении настроек дайджеста для пользователя {user_id}: {e}")
-    finally:
-        conn.close()
 
 # --- История просмотров и статистика ---
 
@@ -796,20 +828,6 @@ def get_user_stats(user_id: int) -> Dict[str, Any]:
     finally:
         conn.close()
 
-def increment_search_count(user_id: int):
-    """Увеличение счетчика поисковых запросов."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            UPDATE user_stats SET total_searches = total_searches + 1 WHERE user_id = ?
-        """, (user_id,))
-        conn.commit()
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при увеличении счетчика поиска для пользователя {user_id}: {e}")
-    finally:
-        conn.close()
-
 def add_search_query(user_id: int, query: str):
     """Добавление поискового запроса в историю."""
     conn = sqlite3.connect(DB_NAME)
@@ -819,7 +837,12 @@ def add_search_query(user_id: int, query: str):
             INSERT INTO search_history (user_id, query) VALUES (?, ?)
         """, (user_id, query))
         conn.commit()
-        increment_search_count(user_id)
+        
+        # Обновляем статистику
+        cursor.execute("""
+            UPDATE user_stats SET total_searches = total_searches + 1 WHERE user_id = ?
+        """, (user_id,))
+        conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Ошибка при добавлении поискового запроса для пользователя {user_id}: {e}")
     finally:
@@ -942,23 +965,7 @@ def get_recommendations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
-def mark_recommendations_shown(user_ids_and_links: List[Tuple[int, str]]):
-    """Отметить рекомендации как показанные."""
-    if not user_ids_and_links:
-        return
-        
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.executemany("""
-            UPDATE recommendations SET is_shown = TRUE 
-            WHERE user_id = ? AND post_link = ?
-        """, user_ids_and_links)
-        conn.commit()
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при отметке рекомендаций как показанных: {e}")
-    finally:
-        conn.close()
+
 
 # --- Уведомления ---
 
